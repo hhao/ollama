@@ -2,12 +2,16 @@ package llm
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"log/slog"
+
+	"golang.org/x/exp/maps"
 )
 
 type containerGGUF struct {
@@ -93,10 +97,6 @@ func newGGUF(container *containerGGUF) *gguf {
 		containerGGUF: container,
 		kv:            make(KV),
 	}
-}
-
-func NewGGUFV3(bo binary.ByteOrder) *gguf {
-	return newGGUF(&containerGGUF{ByteOrder: bo, Version: 3})
 }
 
 func (llm *gguf) KV() KV {
@@ -197,7 +197,7 @@ func (llm *gguf) Decode(rs io.ReadSeeker) error {
 			return err
 		}
 
-		shape := [4]uint64{1, 1, 1, 1}
+		shape := make([]uint64, dims)
 		for i := 0; uint32(i) < dims; i++ {
 			shape[i], err = readGGUF[uint64](llm, rs)
 			if err != nil {
@@ -239,7 +239,7 @@ func (llm *gguf) Decode(rs io.ReadSeeker) error {
 		return err
 	}
 
-	padding := llm.padding(offset, int64(alignment))
+	padding := ggufPadding(offset, int64(alignment))
 	if _, err := rs.Seek(padding, io.SeekCurrent); err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func (llm *gguf) Decode(rs io.ReadSeeker) error {
 			return err
 		}
 
-		padding := llm.padding(int64(tensor.Size()), int64(alignment))
+		padding := ggufPadding(int64(tensor.Size()), int64(alignment))
 		if _, err := rs.Seek(padding, io.SeekCurrent); err != nil {
 			return err
 		}
@@ -266,12 +266,12 @@ func readGGUF[T any](llm *gguf, r io.Reader) (T, error) {
 	return t, err
 }
 
-func writeGGUF[V any](llm *gguf, w io.Writer, t uint32, v V) error {
-	if err := binary.Write(w, llm.ByteOrder, t); err != nil {
+func writeGGUF[V any](w io.Writer, t uint32, v V) error {
+	if err := binary.Write(w, binary.LittleEndian, t); err != nil {
 		return err
 	}
 
-	return binary.Write(w, llm.ByteOrder, v)
+	return binary.Write(w, binary.LittleEndian, v)
 }
 
 func readGGUFV1String(llm *gguf, r io.Reader) (string, error) {
@@ -309,12 +309,12 @@ func readGGUFString(llm *gguf, r io.Reader) (string, error) {
 	return b.String(), nil
 }
 
-func writeGGUFString(llm *gguf, w io.Writer, s string) error {
-	if err := binary.Write(w, llm.ByteOrder, ggufTypeString); err != nil {
+func writeGGUFString(w io.Writer, s string) error {
+	if err := binary.Write(w, binary.LittleEndian, ggufTypeString); err != nil {
 		return err
 	}
 
-	if err := binary.Write(w, llm.ByteOrder, uint64(len(s))); err != nil {
+	if err := binary.Write(w, binary.LittleEndian, uint64(len(s))); err != nil {
 		return err
 	}
 
@@ -428,21 +428,21 @@ func readGGUFArray(llm *gguf, r io.Reader) (a []any, err error) {
 	return
 }
 
-func writeGGUFArray[S ~[]E, E any](llm *gguf, w io.Writer, t uint32, s S) error {
-	if err := binary.Write(w, llm.ByteOrder, ggufTypeArray); err != nil {
+func writeGGUFArray[S ~[]E, E any](w io.Writer, t uint32, s S) error {
+	if err := binary.Write(w, binary.LittleEndian, ggufTypeArray); err != nil {
 		return err
 	}
 
-	if err := binary.Write(w, llm.ByteOrder, t); err != nil {
+	if err := binary.Write(w, binary.LittleEndian, t); err != nil {
 		return err
 	}
 
-	if err := binary.Write(w, llm.ByteOrder, uint64(len(s))); err != nil {
+	if err := binary.Write(w, binary.LittleEndian, uint64(len(s))); err != nil {
 		return err
 	}
 
 	for _, e := range s {
-		if err := binary.Write(w, llm.ByteOrder, e); err != nil {
+		if err := binary.Write(w, binary.LittleEndian, e); err != nil {
 			return err
 		}
 	}
@@ -492,136 +492,43 @@ var ggufKVOrder = map[string][]string{
 	},
 }
 
-func (llm *gguf) Encode(ws io.WriteSeeker, kv KV, tensors []Tensor) error {
-	switch llm.Version {
-	case 3:
-		llm.V3.NumTensor = uint64(len(tensors))
-		llm.V3.NumKV = uint64(len(kv))
-	default:
-		return fmt.Errorf("not implemented: ggufv%d", llm.Version)
-	}
-
-	if err := binary.Write(ws, llm.ByteOrder, []byte("GGUF")); err != nil {
+func WriteGGUF(ws io.WriteSeeker, kv map[string]any, ts []Tensor) error {
+	if err := binary.Write(ws, binary.LittleEndian, []byte("GGUF")); err != nil {
 		return err
 	}
 
-	if err := binary.Write(ws, llm.ByteOrder, llm.Version); err != nil {
+	if err := binary.Write(ws, binary.LittleEndian, uint32(3)); err != nil {
 		return err
 	}
 
-	if err := binary.Write(ws, llm.ByteOrder, llm.numTensor()); err != nil {
+	if err := binary.Write(ws, binary.LittleEndian, uint64(len(ts))); err != nil {
 		return err
 	}
 
-	if err := binary.Write(ws, llm.ByteOrder, llm.numKV()); err != nil {
+	if err := binary.Write(ws, binary.LittleEndian, uint64(len(kv))); err != nil {
 		return err
 	}
 
-	kvCheck := make(map[string]bool)
-	for k := range kv {
-		kvCheck[k] = false
-	}
+	keys := maps.Keys(kv)
+	slices.Sort(keys)
 
-	for _, k := range ggufKVOrder["llama"] {
-		v, ok := kv[k]
-		if !ok {
-			continue
-		}
-		kvCheck[k] = true
-
-		if err := binary.Write(ws, llm.ByteOrder, uint64(len(k))); err != nil {
-			return err
-		}
-
-		if err := binary.Write(ws, llm.ByteOrder, []byte(k)); err != nil {
-			return err
-		}
-
-		var err error
-		switch v := v.(type) {
-		case uint32:
-			err = writeGGUF(llm, ws, ggufTypeUint32, v)
-		case float32:
-			err = writeGGUF(llm, ws, ggufTypeFloat32, v)
-		case bool:
-			err = writeGGUF(llm, ws, ggufTypeBool, v)
-		case string:
-			err = writeGGUFString(llm, ws, v)
-		case []int32:
-			err = writeGGUFArray(llm, ws, ggufTypeInt32, v)
-		case []uint32:
-			err = writeGGUFArray(llm, ws, ggufTypeUint32, v)
-		case []float32:
-			err = writeGGUFArray(llm, ws, ggufTypeFloat32, v)
-		case []string:
-			if err := binary.Write(ws, llm.ByteOrder, ggufTypeArray); err != nil {
-				return err
-			}
-
-			if err := binary.Write(ws, llm.ByteOrder, ggufTypeString); err != nil {
-				return err
-			}
-
-			if err := binary.Write(ws, llm.ByteOrder, uint64(len(v))); err != nil {
-				return err
-			}
-
-			for _, e := range v {
-				if err := binary.Write(ws, llm.ByteOrder, uint64(len(e))); err != nil {
-					return err
-				}
-
-				if err := binary.Write(ws, llm.ByteOrder, []byte(e)); err != nil {
-					return err
-				}
-			}
-		default:
-			return fmt.Errorf("improper type for '%s'", k)
-		}
-		if err != nil {
+	for _, key := range keys {
+		if err := ggufWriteKV(ws, key, kv[key]); err != nil {
 			return err
 		}
 	}
 
-	for k, v := range kvCheck {
-		if !v {
-			return fmt.Errorf("Didn't know how to write kv %s", k)
-		}
-	}
+	slices.SortFunc(ts, func(i, j Tensor) int {
+		return cmp.Compare(i.Name, j.Name)
+	})
 
-	for _, tensor := range tensors {
-		if err := binary.Write(ws, llm.ByteOrder, uint64(len(tensor.Name))); err != nil {
+	var s uint64
+	for _, t := range ts {
+		t.Offset = s
+		if err := ggufWriteTensorInfo(ws, t); err != nil {
 			return err
 		}
-
-		if err := binary.Write(ws, llm.ByteOrder, []byte(tensor.Name)); err != nil {
-			return err
-		}
-
-		dims := 0
-		for cnt := 0; cnt < len(tensor.Shape); cnt++ {
-			if tensor.Shape[cnt] > 0 {
-				dims++
-			}
-		}
-
-		if err := binary.Write(ws, llm.ByteOrder, uint32(dims)); err != nil {
-			return err
-		}
-
-		for i := 0; i < dims; i++ {
-			if err := binary.Write(ws, llm.ByteOrder, uint64(tensor.Shape[dims-1-i])); err != nil {
-				return err
-			}
-		}
-
-		if err := binary.Write(ws, llm.ByteOrder, tensor.Kind); err != nil {
-			return err
-		}
-
-		if err := binary.Write(ws, llm.ByteOrder, tensor.Offset); err != nil {
-			return err
-		}
+		s += t.Size()
 	}
 
 	offset, err := ws.Seek(0, io.SeekCurrent)
@@ -630,23 +537,12 @@ func (llm *gguf) Encode(ws io.WriteSeeker, kv KV, tensors []Tensor) error {
 	}
 
 	var alignment int64 = 32
-	padding := llm.padding(offset, alignment)
-	if err := binary.Write(ws, llm.ByteOrder, bytes.Repeat([]byte{0}, int(padding))); err != nil {
+	if err := binary.Write(ws, binary.LittleEndian, bytes.Repeat([]byte{0}, int(ggufPadding(offset, alignment)))); err != nil {
 		return err
 	}
 
-	for _, tensor := range tensors {
-		if _, err := tensor.WriteTo(ws); err != nil {
-			return err
-		}
-
-		offset, err := ws.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return err
-		}
-
-		padding := llm.padding(offset, alignment)
-		if err := binary.Write(ws, llm.ByteOrder, bytes.Repeat([]byte{0}, int(padding))); err != nil {
+	for _, t := range ts {
+		if err := ggufWriteTensor(ws, t, alignment); err != nil {
 			return err
 		}
 	}
@@ -654,6 +550,99 @@ func (llm *gguf) Encode(ws io.WriteSeeker, kv KV, tensors []Tensor) error {
 	return nil
 }
 
-func (gguf) padding(offset, align int64) int64 {
+func ggufWriteKV(ws io.WriteSeeker, k string, v any) error {
+	if err := binary.Write(ws, binary.LittleEndian, uint64(len(k))); err != nil {
+		return err
+	}
+
+	if err := binary.Write(ws, binary.LittleEndian, []byte(k)); err != nil {
+		return err
+	}
+
+	var err error
+	switch v := v.(type) {
+	case uint32:
+		err = writeGGUF(ws, ggufTypeUint32, v)
+	case float32:
+		err = writeGGUF(ws, ggufTypeFloat32, v)
+	case bool:
+		err = writeGGUF(ws, ggufTypeBool, v)
+	case string:
+		err = writeGGUFString(ws, v)
+	case []int32:
+		err = writeGGUFArray(ws, ggufTypeInt32, v)
+	case []uint32:
+		err = writeGGUFArray(ws, ggufTypeUint32, v)
+	case []float32:
+		err = writeGGUFArray(ws, ggufTypeFloat32, v)
+	case []string:
+		if err := binary.Write(ws, binary.LittleEndian, ggufTypeArray); err != nil {
+			return err
+		}
+
+		if err := binary.Write(ws, binary.LittleEndian, ggufTypeString); err != nil {
+			return err
+		}
+
+		if err := binary.Write(ws, binary.LittleEndian, uint64(len(v))); err != nil {
+			return err
+		}
+
+		for _, e := range v {
+			if err := binary.Write(ws, binary.LittleEndian, uint64(len(e))); err != nil {
+				return err
+			}
+
+			if err := binary.Write(ws, binary.LittleEndian, []byte(e)); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("improper type for '%s'", k)
+	}
+
+	return err
+}
+
+func ggufWriteTensorInfo(ws io.WriteSeeker, t Tensor) error {
+	if err := binary.Write(ws, binary.LittleEndian, uint64(len(t.Name))); err != nil {
+		return err
+	}
+
+	if err := binary.Write(ws, binary.LittleEndian, []byte(t.Name)); err != nil {
+		return err
+	}
+
+	if err := binary.Write(ws, binary.LittleEndian, uint32(len(t.Shape))); err != nil {
+		return err
+	}
+
+	for i := 0; i < len(t.Shape); i++ {
+		if err := binary.Write(ws, binary.LittleEndian, uint64(t.Shape[len(t.Shape)-i-1])); err != nil {
+			return err
+		}
+	}
+
+	if err := binary.Write(ws, binary.LittleEndian, t.Kind); err != nil {
+		return err
+	}
+
+	return binary.Write(ws, binary.LittleEndian, t.Offset)
+}
+
+func ggufWriteTensor(ws io.WriteSeeker, t Tensor, alignment int64) error {
+	if _, err := t.WriteTo(ws); err != nil {
+		return err
+	}
+
+	offset, err := ws.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+
+	return binary.Write(ws, binary.LittleEndian, bytes.Repeat([]byte{0}, int(ggufPadding(offset, alignment))))
+}
+
+func ggufPadding(offset, align int64) int64 {
 	return (align - offset%align) % align
 }

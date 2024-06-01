@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,10 +11,10 @@ import (
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/app/lifecycle"
+	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/gpu"
 	"github.com/ollama/ollama/llm"
-	"github.com/ollama/ollama/envconfig"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -116,8 +115,7 @@ func newScenario(t *testing.T, ctx context.Context, modelName string, estimatedV
 	assert.Nil(t, err)
 	defer f.Close()
 
-	gguf := llm.NewGGUFV3(binary.LittleEndian)
-	err = gguf.Encode(f, llm.KV{
+	assert.NoError(t, llm.WriteGGUF(f, llm.KV{
 		"general.architecture":          "llama",
 		"general.name":                  "name",
 		"llama.context_length":          uint32(32),
@@ -130,8 +128,7 @@ func newScenario(t *testing.T, ctx context.Context, modelName string, estimatedV
 		"tokenizer.ggml.token_type":     []int32{0},
 	}, []llm.Tensor{
 		{Name: "blk.0.attn.weight", Kind: uint32(0), Offset: uint64(0), Shape: []uint64{1, 1, 1, 1}, WriterTo: &bytes.Reader{}},
-	})
-	assert.Nil(t, err)
+	}))
 
 	fname := f.Name()
 	model := &Model{Name: modelName, ModelPath: fname}
