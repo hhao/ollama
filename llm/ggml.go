@@ -1,10 +1,13 @@
 package llm
 
 import (
+	"bytes"
+	"embed"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 )
 
@@ -79,6 +82,50 @@ func (kv KV) EmbeddingLength() uint64 {
 
 func (kv KV) ContextLength() uint64 {
 	return kv.u64(fmt.Sprintf("%s.context_length", kv.Architecture()))
+}
+
+func (kv KV) ChatTemplate() string {
+	if tmpl, ok := kv["tokenizer.chat_template"].(string); ok {
+		switch {
+		case strings.Contains(tmpl, "<|im_start|>"):
+			return "chatml"
+		case strings.Contains(tmpl, "<<SYS>>"):
+			// llama2-chat must appear before mistral
+			return "llama2-chat"
+		case strings.Contains(tmpl, "<|start_header_id|>"):
+			return "llama3-instruct"
+		case strings.Contains(tmpl, "[INST]"):
+			return "mistral-instruct"
+		case strings.Contains(tmpl, "<start_of_turn>"):
+			return "gemma-instruct"
+		case strings.Contains(tmpl, "<|assistant|>"):
+			return "phi"
+		case strings.Contains(tmpl, "GPT4 Correct Assistant:"):
+			return "openchat"
+		case strings.Contains(tmpl, "### System:"):
+			return "solar-instruct"
+		case strings.Contains(tmpl, "### Instruction:\\n"):
+			return "alpaca"
+		case strings.Contains(tmpl, "ASSISTANT: "):
+			return "vicuna"
+		case strings.Contains(tmpl, "Assistant:"):
+			return "chatqa"
+		case strings.Contains(tmpl, "Falcon:"):
+			return "falcon-instruct"
+		case strings.Contains(tmpl, "<start_user>"):
+			return "alfred"
+		case strings.Contains(tmpl, "@@ Response"):
+			return "magicoder"
+		case strings.Contains(tmpl, "Answer:"):
+			return "granite-instruct"
+		case strings.Contains(tmpl, "Source: assistant"):
+			return "codellama-70b-instruct"
+		case strings.Contains(tmpl, "### Response"):
+			return "starcoder2-instruct"
+		}
+	}
+
+	return "unknown"
 }
 
 type Tensors []*Tensor
@@ -364,4 +411,16 @@ func (llm GGML) GraphSize(context, batch uint64) (partialOffload, fullOffload ui
 	}
 
 	return
+}
+
+//go:embed templates/*.gotmpl
+var templatesFS embed.FS
+
+func NamedTemplate(n string) (io.Reader, error) {
+	bts, err := templatesFS.ReadFile(path.Join("templates", fmt.Sprintf("%s.gotmpl", n)))
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewReader(bts), nil
 }
