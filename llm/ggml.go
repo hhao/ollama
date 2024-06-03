@@ -81,11 +81,14 @@ func (kv KV) ContextLength() uint64 {
 	return kv.u64(fmt.Sprintf("%s.context_length", kv.Architecture()))
 }
 
-type Tensors []*Tensor
+type Tensors struct {
+	Items  []*Tensor
+	Offset uint64
+}
 
 func (ts Tensors) Layers() map[string]Layer {
 	layers := make(map[string]Layer)
-	for _, t := range ts {
+	for _, t := range ts.Items {
 		parts := strings.Split(t.Name, ".")
 		if parts[0] == "blk" {
 			// join first and second part, e.g. blk.%d
